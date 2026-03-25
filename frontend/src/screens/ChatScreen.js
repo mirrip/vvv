@@ -1,13 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, FlatList, TextInput, TouchableOpacity, StyleSheet, KeyboardAvoidingView, Platform, Alert, ScrollView } from 'react-native';
+import { View, Text, FlatList, TextInput, TouchableOpacity, StyleSheet, KeyboardAvoidingView, Platform, Alert, ScrollView, ActivityIndicator } from 'react-native';
 import { useAuth } from '../context/AuthContext';
 import api from '../api';
 import { socket } from '../utils/socket';
 import MessageBubble from '../components/MessageBubble';
-import * as DocumentPicker from 'expo-document-picker';
-import * as ImagePicker from 'expo-image-picker';
-import { Audio } from 'expo-av';
-import { Camera } from 'expo-camera';
 
 export default function ChatScreen({ route, navigation }) {
   const { chat } = route.params;
@@ -15,21 +11,17 @@ export default function ChatScreen({ route, navigation }) {
   const [messages, setMessages] = useState([]);
   const [inputText, setInputText] = useState('');
   const [selectedFiles, setSelectedFiles] = useState([]);
-  const [recording, setRecording] = useState(null);
-  const [isRecording, setIsRecording] = useState(false);
-  const [recordingMode, setRecordingMode] = useState('voice'); // 'voice' or 'video'
   const [showReactionPicker, setShowReactionPicker] = useState(false);
   const [selectedMessage, setSelectedMessage] = useState(null);
+  const [loading, setLoading] = useState(true);
   const flatListRef = useRef();
 
   useEffect(() => {
     fetchMessages();
-    connectSocket(user.id);
     
     socket.on('new_message', (msg) => {
       if (msg.chat_id === chat.id) {
         setMessages(prev => [...prev, msg]);
-        // Mark as read
         markAsRead(msg.id);
       }
     });
@@ -44,8 +36,22 @@ export default function ChatScreen({ route, navigation }) {
       setMessages(prev => prev.filter(m => m.id !== messageId));
     });
 
-    socket.on('typing', ({ userId }) => {
-      // Show typing indicator
+    socket.on('typing', ({ userId }) => {});
+
+    socket.on('stop_typing', ({ userId }) => {});
+
+    socket.on('reaction_update', ({ messageId, userId, reaction }) => {
+      setMessages(prev => prev.map(m => {
+        if (m.id === messageId) {
+          const existing = m.reactions?.find(r => r.user_id === userId);
+          if (existing) {
+            existing.reaction = reaction;
+          } else {
+            m.reactions = [...(m.reactions || []), { user_id: userId, reaction }];
+          }
+        }
+        return m;
+      }));
     });
 
     return () => {
@@ -53,13 +59,29 @@ export default function ChatScreen({ route, navigation }) {
       socket.off('message_updated');
       socket.off('message_deleted');
       socket.off('typing');
+      socket.off('stop_typing');
+      socket.off('reaction_update');
     };
   }, [chat.id]);
+
+  useEffect(() => {
+    navigation.setOptions({ title: chat.title });
+  }, [chat.title]);
 
   const fetchMessages = async () => {
     try {
       const res = await api.get(`/chats/${chat.id}/messages`);
       setMessages(res.data);
+      setLoading(false);
+    } catch (error) {
+      console.error(error);
+      setLoading(false);
+    }
+  };
+
+  const markAsRead = async (messageId) => {
+    try {
+      await api.post(`/messages/${messageId}/read`, { userId: user.id });
     } catch (error) {
       console.error(error);
     }
@@ -67,7 +89,7 @@ export default function ChatScreen({ route, navigation }) {
 
   const sendMessage = async () => {
     if (!inputText.trim() && selectedFiles.length === 0) return;
-
+    
     try {
       const formData = new FormData();
       formData.append('chat_id', chat.id);
@@ -75,172 +97,59 @@ export default function ChatScreen({ route, navigation }) {
       formData.append('type', 'text');
       formData.append('content', inputText);
 
-      selectedFiles.forEach((file, index) => {
-        formData.append('files', {
-          uri: file.uri,
-          name: file.name || `file${index}`,
-          type: file.type || 'application/octet-stream'
-        });
-      });
-
-      const res = await api.post('/messages', formData, {
+      await api.post('/messages', formData, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
 
-      setMessages(prev => [...prev, res.data]);
       setInputText('');
       setSelectedFiles([]);
     } catch (error) {
-      console.error(error);
       Alert.alert('Błąd', 'Nie udało się wysłać wiadomości');
     }
   };
 
-  const markAsRead = async (messageId) => {
-    try {
-      await api.post(`/messages/${messageId}/read`, {
-        userId: user.id,
-        chat_id: chat.id
-      });
-    } catch (error) {
-      console.error(error);
-    }
+  const handleTyping = () => {
+    socket.emit('typing', { chatId: chat.id, userId: user.id });
   };
 
-  const pickFile = async () => {
-    const result = await DocumentPicker.getDocumentAsync({});
-    if (!result.canceled) {
-      const file = result.assets[0];
-      setSelectedFiles([...selectedFiles, {
-        uri: file.uri,
-        name: file.name,
-        type: 'application/octet-stream'
-      }]);
-    }
+  const handleStopTyping = () => {
+    socket.emit('stop_typing', { chatId: chat.id, userId: user.id });
   };
 
-  const pickImage = async () => {
-    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert('Brak uprawnień', 'Potrzebujemy dostępu do galerii');
-      return;
-    }
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.All,
-      allowsMultipleSelection: true
-    });
-    if (!result.canceled) {
-      const newFiles = result.assets.map(asset => ({
-        uri: asset.uri,
-        name: asset.fileName || 'image.jpg',
-        type: asset.type || 'image/jpeg'
-      }));
-      setSelectedFiles([...selectedFiles, ...newFiles]);
-    }
-  };
-
-  const startRecording = async () => {
-    if (recordingMode === 'voice') {
-      try {
-        await Audio.requestPermissionsAsync();
-        await Audio.setAudioModeAsync({
-          allowsRecordingIOS: true,
-        });
-        const { recording } = await Audio.Recording.createAsync(
-          Audio.RecordingOptionsPresets.HIGH_QUALITY
-        );
-        setRecording(recording);
-        setIsRecording(true);
-      } catch (error) {
-        console.error(error);
-      }
-    } else {
-      // Video recording would require Camera component
-      Alert.alert('Info', 'Nagrywanie wideo wymaga aparatu');
-    }
-  };
-
-  const stopRecording = async () => {
-    if (recording) {
-      setIsRecording(false);
-      await recording.stopAndUnloadAsync();
-      const uri = recording.getURI();
-      setRecording(null);
-      
-      // Send voice message
-      if (uri) {
-        const formData = new FormData();
-        formData.append('chat_id', chat.id);
-        formData.append('sender_id', user.id);
-        formData.append('type', 'voice');
-        formData.append('content', 'Voice message');
-        formData.append('files', {
-          uri,
-          name: 'voice.m4a',
-          type: 'audio/m4a'
-        });
-
-        try {
-          const res = await api.post('/messages', formData, {
-            headers: { 'Content-Type': 'multipart/form-data' }
-          });
-          setMessages(prev => [...prev, res.data]);
-        } catch (error) {
-          console.error(error);
-        }
-      }
-    }
-  };
-
-  const handleMessageLongPress = (message) => {
-    setSelectedMessage(message);
-    Alert.alert(
-      'Wiadomość',
-      '',
-      [
-        { text: 'Odpowiedz', onPress: () => {} },
-        { text: 'Przekaż', onPress: () => {} },
-        { text: 'Kopiuj', onPress: () => {} },
-        { text: 'Usuń', onPress: () => deleteMessage(message.id), style: 'destructive' },
-        { text: 'Anuluj', style: 'cancel' }
-      ],
-      { cancelable: true }
-    );
-  };
-
-  const deleteMessage = async (messageId) => {
-    try {
-      await api.delete(`/messages/${messageId}`);
-      setMessages(prev => prev.filter(m => m.id !== messageId));
-    } catch (error) {
-      console.error(error);
-    }
-  };
-
-  const addReaction = async (messageId, reaction) => {
+  const handleReaction = async (messageId, reaction) => {
     try {
       await api.post(`/messages/${messageId}/reactions`, {
         userId: user.id,
-        reaction,
-        chat_id: chat.id
+        reaction
       });
+      setShowReactionPicker(false);
+      setSelectedMessage(null);
     } catch (error) {
       console.error(error);
     }
   };
 
-  return (
-    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()}>
-          <Text style={styles.backButton}>←</Text>
-        </TouchableOpacity>
-        <Text style={styles.chatTitle}>{chat.title}</Text>
-        <TouchableOpacity onPress={() => navigation.navigate('ProfileView', { userId: chat.id })}>
-          <Text style={styles.infoButton}>ℹ</Text>
-        </TouchableOpacity>
+  const handleLongPress = (message) => {
+    setSelectedMessage(message);
+    setShowReactionPicker(true);
+  };
+
+  const reactions = ['👍', '❤️', '😂', '😮', '😢', '😡'];
+
+  if (loading) {
+    return (
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator size="large" color="#AA00FF" />
       </View>
-      
+    );
+  }
+
+  return (
+    <KeyboardAvoidingView 
+      style={styles.container} 
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={90}
+    >
       <FlatList
         ref={flatListRef}
         data={messages}
@@ -249,54 +158,51 @@ export default function ChatScreen({ route, navigation }) {
           <MessageBubble 
             message={item} 
             userId={user.id}
-            onLongPress={() => handleMessageLongPress(item)}
-            onReaction={(reaction) => addReaction(item.id, reaction)}
+            onLongPress={() => handleLongPress(item)}
           />
         )}
-        onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: false })}
+        onContentSizeChange={() => flatListRef.current?.scrollToEnd()}
+        contentContainerStyle={styles.messageList}
       />
-      
-      {selectedFiles.length > 0 && (
-        <ScrollView horizontal style={styles.filesPreview}>
-          {selectedFiles.map((file, index) => (
-            <View key={index} style={styles.filePreview}>
-              <Text style={styles.fileName}>{file.name}</Text>
-              <TouchableOpacity onPress={() => {
-                const newFiles = [...selectedFiles];
-                newFiles.splice(index, 1);
-                setSelectedFiles(newFiles);
-              }}>
-                <Text style={styles.removeFile}>✕</Text>
+
+      {showReactionPicker && (
+        <View style={styles.reactionPicker}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+            {reactions.map((r, i) => (
+              <TouchableOpacity 
+                key={i} 
+                style={styles.reactionButton}
+                onPress={() => handleReaction(selectedMessage?.id, r)}
+              >
+                <Text style={styles.reactionText}>{r}</Text>
               </TouchableOpacity>
-            </View>
-          ))}
-        </ScrollView>
+            ))}
+            <TouchableOpacity onPress={() => setShowReactionPicker(false)}>
+              <Text style={styles.closeButton}>✕</Text>
+            </TouchableOpacity>
+          </ScrollView>
+        </View>
       )}
-      
+
       <View style={styles.inputContainer}>
-        <TouchableOpacity onPress={pickImage}>
+        <TouchableOpacity onPress={() => Alert.alert('Informacja', 'Wyślij plik będzie dostępne wkrótce')}>
           <Text style={styles.attachButton}>📎</Text>
         </TouchableOpacity>
+        
         <TextInput
           style={styles.input}
           value={inputText}
           onChangeText={setInputText}
           placeholder="Wiadomość..."
           placeholderTextColor="#aaa"
+          onFocus={handleTyping}
+          onBlur={handleStopTyping}
         />
-        {inputText.length === 0 && selectedFiles.length === 0 ? (
-          <>
-            <TouchableOpacity 
-              onPressIn={startRecording} 
-              onPressOut={stopRecording}
-              delayLongPress={500}
-            >
-              <Text style={styles.actionButton}>{recordingMode === 'voice' ? '🎤' : '📹'}</Text>
-            </TouchableOpacity>
-            <TouchableOpacity onPress={() => setRecordingMode(recordingMode === 'voice' ? 'video' : 'voice')}>
-              <Text style={styles.actionButton}>🔄</Text>
-            </TouchableOpacity>
-          </>
+
+        {inputText.length === 0 ? (
+          <TouchableOpacity onPress={() => Alert.alert('Informacja', 'Nagrywanie będzie dostępne wkrótce')}>
+            <Text style={styles.actionButton}>🎤</Text>
+          </TouchableOpacity>
         ) : (
           <TouchableOpacity onPress={sendMessage}>
             <Text style={styles.sendButton}>➤</Text>
@@ -309,17 +215,35 @@ export default function ChatScreen({ route, navigation }) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 15, borderBottomWidth: 1, borderBottomColor: '#1a1a1a', paddingTop: 50 },
-  backButton: { color: '#AA00FF', fontSize: 24 },
-  chatTitle: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
-  infoButton: { color: '#AA00FF', fontSize: 24 },
-  inputContainer: { flexDirection: 'row', alignItems: 'center', padding: 10, borderTopWidth: 1, borderTopColor: '#1a1a1a' },
-  attachButton: { color: '#AA00FF', fontSize: 24, marginHorizontal: 10 },
-  input: { flex: 1, backgroundColor: '#1a1a1a', color: '#fff', padding: 10, borderRadius: 20 },
-  actionButton: { color: '#AA00FF', fontSize: 24, marginHorizontal: 10 },
-  sendButton: { color: '#AA00FF', fontSize: 24, marginHorizontal: 10 },
-  filesPreview: { maxHeight: 60, paddingHorizontal: 10, backgroundColor: '#1a1a1a' },
-  filePreview: { marginRight: 10, backgroundColor: '#333', padding: 10, borderRadius: 8, flexDirection: 'row', alignItems: 'center' },
-  fileName: { color: '#fff', marginRight: 5 },
-  removeFile: { color: '#AA00FF' }
+  loadingContainer: { flex: 1, backgroundColor: '#000', justifyContent: 'center', alignItems: 'center' },
+  messageList: { paddingVertical: 10 },
+  inputContainer: { 
+    flexDirection: 'row', 
+    alignItems: 'center', 
+    padding: 10, 
+    borderTopWidth: 1, 
+    borderTopColor: '#1a1a1a',
+    backgroundColor: '#000'
+  },
+  attachButton: { fontSize: 24, marginHorizontal: 10 },
+  input: { 
+    flex: 1, 
+    backgroundColor: '#1a1a1a', 
+    color: '#fff', 
+    padding: 10, 
+    borderRadius: 20,
+    marginHorizontal: 10
+  },
+  actionButton: { fontSize: 24, marginHorizontal: 10 },
+  sendButton: { fontSize: 24, marginHorizontal: 10, color: '#AA00FF' },
+  reactionPicker: {
+    flexDirection: 'row',
+    padding: 10,
+    backgroundColor: '#1a1a1a',
+    borderTopWidth: 1,
+    borderTopColor: '#333'
+  },
+  reactionButton: { padding: 10, marginHorizontal: 5 },
+  reactionText: { fontSize: 24 },
+  closeButton: { fontSize: 20, padding: 10, color: '#aaa' }
 });

@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import { View, Text, TouchableOpacity, Image, TextInput, Switch, Alert, StyleSheet } from 'react-native';
-import * as ImagePicker from 'expo-image-picker';
 import { useAuth } from '../context/AuthContext';
 import api from '../api';
 
@@ -11,35 +10,7 @@ export default function ProfileScreen({ navigation }) {
   const [showPassword, setShowPassword] = useState(false);
 
   const pickImage = async () => {
-    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert('Brak uprawnień', 'Potrzebujemy dostępu do galerii');
-      return;
-    }
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: true,
-      aspect: [1, 1],
-      quality: 0.5,
-    });
-    if (!result.canceled) {
-      const uri = result.assets[0].uri;
-      const formData = new FormData();
-      formData.append('avatar', {
-        uri,
-        name: 'avatar.jpg',
-        type: 'image/jpeg'
-      });
-      try {
-        const res = await api.post(`/users/${user.id}/avatar`, formData, {
-          headers: { 'Content-Type': 'multipart/form-data' }
-        });
-        user.avatar = res.data.avatar;
-        Alert.alert('Sukces', 'Awatar zmieniony');
-      } catch (error) {
-        Alert.alert('Błąd', 'Nie udało się zmienić awatara');
-      }
-    }
+    Alert.alert('Informacja', 'Wybór zdjęcia będzie dostępny po zainstalowaniu pełnej wersji APK');
   };
 
   const saveProfile = async () => {
